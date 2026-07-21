@@ -1,6 +1,6 @@
 {
   "name": "@adaudit/lean-omp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Update-safe context, delegation, and recovery guardrails for OMP sessions hosted by Orca.",
   "type": "module",
   "license": "MIT",
@@ -21,8 +21,10 @@
   ],
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "test:integration": "node scripts/smoke-rpc.js",
+    "test:stress": "node scripts/stress-store.js",
     "doctor": "node scripts/doctor.js",
-    "check": "npm run test && npm run doctor"
+    "check": "npm run test && npm run doctor && npm run test:integration && npm run test:stress"
   },
   "repository": {
     "type": "git",

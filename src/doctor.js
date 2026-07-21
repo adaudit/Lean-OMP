@@ -4,7 +4,7 @@ export function parseVersion(text) {
   return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) };
 }
 
-export function checkOmpCompatibility(text) {
+export function checkOmpCompatibility(text, { allowFutureMajor = false } = {}) {
   const version = parseVersion(text);
   if (!version) {
     return { compatible: false, severity: "error", message: `Could not parse OMP version from '${text}'.` };
@@ -19,10 +19,12 @@ export function checkOmpCompatibility(text) {
   }
   if (version.major > 17) {
     return {
-      compatible: true,
-      severity: "warning",
+      compatible: allowFutureMajor,
+      severity: allowFutureMajor ? "warning" : "error",
       version,
-      message: `OMP ${version.major}.${version.minor}.${version.patch} is newer than the verified major version. Public capability checks will fail open, but run the integration test before enabling enforcement.`,
+      message: allowFutureMajor
+        ? `OMP ${version.major}.${version.minor}.${version.patch} is newer than the verified major version and was explicitly allowed. Run the integration smoke test before enforcement.`
+        : `OMP ${version.major}.${version.minor}.${version.patch} is newer than the verified major version 17. Lean-OMP remains disabled until compatibility is tested or LEAN_OMP_ALLOW_FUTURE_MAJOR=1 is set.`,
     };
   }
   return {

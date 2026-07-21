@@ -1,15 +1,25 @@
+import crypto from "node:crypto";
 import { formatConfig, loadConfig } from "./config.js";
 import { isSnapshotPoll, pollBlockReason, pollingKey } from "./polling.js";
 import { LeanStore, resolveSessionId } from "./store.js";
 import { analyzeTaskInput, taskBlockReason } from "./task-policy.js";
 import { estimateTokens } from "./tokens.js";
 
-export const LEAN_OMP_VERSION = "0.1.0";
+export const LEAN_OMP_VERSION = "1.0.0";
 
-function extensionCapabilities(pi) {
+export function extensionCapabilities(pi) {
   const missing = ["on", "registerTool", "registerCommand"].filter(
     (capability) => typeof pi?.[capability] !== "function",
   );
+  if (
+    !pi?.zod ||
+    typeof pi.zod.object !== "function" ||
+    typeof pi.zod.enum !== "function" ||
+    typeof pi.zod.string !== "function" ||
+    typeof pi.zod.array !== "function"
+  ) {
+    missing.push("zod");
+  }
   return { compatible: missing.length === 0, missing };
 }
 
@@ -29,6 +39,16 @@ function resultText(event, limit = 4_000) {
     .map((item) => item.text)
     .join("\n")
     .slice(0, limit);
+}
+
+export function redactCheckpoint(value, limit = 16 * 1024) {
+  const redacted = String(value || "")
+    .replace(/\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[REDACTED_GITHUB_TOKEN]")
+    .replace(/\b(sk-[A-Za-z0-9_-]{20,})\b/g, "[REDACTED_API_KEY]")
+    .replace(/\b(AIza[A-Za-z0-9_-]{20,})\b/g, "[REDACTED_API_KEY]")
+    .replace(/((?:password|passwd|token|api[_-]?key|secret)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/(authorization\s*:\s*(?:bearer|basic)\s+)[^\s]+/gi, "$1[REDACTED]");
+  return redacted.slice(0, limit);
 }
 
 function orchestrationPolicy(config, status) {
@@ -62,6 +82,7 @@ export function createLeanOmpRuntime(pi, options = {}) {
   const config = options.config || loadConfig(env);
   const capabilities = extensionCapabilities(pi);
   const stores = new Map();
+  const processInstance = options.processInstance || crypto.randomUUID();
   let lastContextSampleAt = 0;
   let lastContextTokens = 0;
 
@@ -76,6 +97,9 @@ export function createLeanOmpRuntime(pi, options = {}) {
           config,
           sessionId,
           now: options.now,
+          processId: options.processId,
+          processInstance,
+          isProcessAlive: options.isProcessAlive,
         }),
       );
     }
@@ -97,6 +121,13 @@ export function createLeanOmpRuntime(pi, options = {}) {
 export default function leanOmp(pi) {
   const runtime = createLeanOmpRuntime(pi);
   const { config, capabilities, safely, storeFor } = runtime;
+  const lastTaskHeartbeat = new Map();
+  const terminalProgress = new Set();
+
+  if (!capabilities.compatible) {
+    logger(pi, "warn", `[lean-omp] disabled: missing extension capabilities ${capabilities.missing.join(", ")}`);
+    return;
+  }
 
   pi.registerCommand("lean-doctor", {
     description: "Show Lean-OMP activation, compatibility, and safety limits",
@@ -114,11 +145,6 @@ export default function leanOmp(pi) {
       );
     },
   });
-
-  if (!capabilities.compatible) {
-    logger(pi, "warn", `[lean-omp] disabled: missing extension capabilities ${capabilities.missing.join(", ")}`);
-    return;
-  }
 
   if (!config.active) {
     logger(pi, "debug", "[lean-omp] inactive outside Orca; set LEAN_OMP_MODE=observe|enforce to override");
@@ -187,8 +213,19 @@ export default function leanOmp(pi) {
     },
   });
 
+  pi.registerCommand("lean-gc", {
+    description: "Preview or apply expired Lean-OMP event-journal cleanup (use --apply to delete)",
+    handler: async (args, ctx) => {
+      const apply = String(args || "").trim() === "--apply";
+      commandReport(pi, "lean-omp-gc", storeFor(ctx).pruneEvents({ apply }), ctx);
+    },
+  });
+
   pi.on("session_start", async (_event, ctx) => {
-    safely(ctx, (store) => store.append("session_started", { mode: config.mode }));
+    safely(ctx, (store) => {
+      const retention = store.pruneEvents({ apply: true });
+      store.append("session_started", { mode: config.mode, retention });
+    });
     ctx.ui.setStatus("lean-omp", `Lean ${config.mode}`);
   });
 
@@ -217,15 +254,17 @@ export default function leanOmp(pi) {
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName === "task") {
       const analysis = analyzeTaskInput(event.input, config);
-      const duplicate = safely(ctx, (store) => store.findRunningDuplicate(analysis.hash));
+      const duplicate = analysis.packets
+        .map((packet) => safely(ctx, (store) => store.findRunningDuplicate(packet.hash)))
+        .find(Boolean);
       if (analysis.violations.length || duplicate) {
         const reason = duplicate
-          ? `Lean-OMP blocked a duplicate task that is already running as tool call ${duplicate.toolCallId}. Wait for its automatic result instead of launching it again.`
+          ? `Lean-OMP blocked a duplicate task that is already active as tool call ${duplicate.toolCallId}, child ${Number(duplicate.childIndex ?? 0) + 1}. Wait for its automatic result instead of launching it again.`
           : taskBlockReason(analysis);
         safely(ctx, (store) =>
           store.append("task_blocked", {
             toolCallId: event.toolCallId,
-            hash: analysis.hash,
+            hash: duplicate?.hash || analysis.hash,
             reason,
             analysis,
             observedOnly: !config.enforce,
@@ -233,13 +272,17 @@ export default function leanOmp(pi) {
         );
         if (config.enforce) return { block: true, reason };
       }
-      safely(ctx, (store) =>
-        store.append("task_started", {
-          toolCallId: event.toolCallId,
-          hash: analysis.hash,
-          analysis,
-        }),
-      );
+      for (const packet of analysis.packets) {
+        safely(ctx, (store) =>
+          store.append("task_started", {
+            toolCallId: event.toolCallId,
+            childIndex: packet.index,
+            hash: packet.hash,
+            parentHash: analysis.hash,
+            analysis: packet,
+          }),
+        );
+      }
       return;
     }
 
@@ -268,13 +311,86 @@ export default function leanOmp(pi) {
     }
   });
 
+  pi.on("tool_execution_update", async (event, ctx) => {
+    if (event.toolName !== "task") return;
+    const details = event.partialResult?.details || event.partialResult;
+    const progress = Array.isArray(details?.progress) ? details.progress : [];
+    for (const child of progress) {
+      const status = child.status;
+      const terminal = status === "completed" || status === "failed" || status === "aborted";
+      const progressKey = `${resolveSessionId(ctx)}:${event.toolCallId}:${Number(child.index || 0)}`;
+      const now = Date.now();
+      if (terminal) {
+        if (terminalProgress.has(progressKey)) continue;
+        terminalProgress.add(progressKey);
+      } else {
+        const previous = lastTaskHeartbeat.get(progressKey) || 0;
+        if (now - previous < config.taskHeartbeatIntervalMs) continue;
+        lastTaskHeartbeat.set(progressKey, now);
+      }
+      safely(ctx, (store) =>
+        store.append(terminal ? "task_finished" : "task_heartbeat", {
+          toolCallId: event.toolCallId,
+          childIndex: Number(child.index || 0),
+          ...(terminal ? { isError: status !== "completed" } : {}),
+          progress: {
+            status,
+            currentTool: child.currentTool,
+            toolCount: child.toolCount,
+            requests: child.requests,
+            tokens: child.tokens,
+          },
+        }),
+      );
+    }
+  });
+
   pi.on("tool_result", async (event, ctx) => {
     if (event.toolName === "task") {
+      const results = Array.isArray(event.details?.results) ? event.details.results : [];
+      if (results.length) {
+        for (const result of results) {
+          safely(ctx, (store) =>
+            store.append("task_finished", {
+              toolCallId: event.toolCallId,
+              childIndex: Number(result.index || 0),
+              agent: result.agent,
+              isError: Boolean(result.exitCode || result.error || result.aborted),
+              result: redactCheckpoint(result.output || result.stderr || result.error, config.maxCheckpointBytes),
+              durationMs: result.durationMs,
+              requests: result.requests,
+              tokens: result.tokens,
+            }),
+          );
+        }
+      } else if (event.isError) {
+        const analysis = analyzeTaskInput(event.input, config);
+        for (const packet of analysis.packets) {
+          safely(ctx, (store) =>
+            store.append("task_finished", {
+              toolCallId: event.toolCallId,
+              childIndex: packet.index,
+              isError: true,
+              result: redactCheckpoint(resultText(event), config.maxCheckpointBytes),
+            }),
+          );
+        }
+      } else {
+        safely(ctx, (store) =>
+          store.append("task_result_incomplete", {
+            toolCallId: event.toolCallId,
+            reason: "OMP returned no per-child result details; tasks remain active until liveness proves interruption.",
+          }),
+        );
+      }
+    }
+    if (event.toolName !== "lean_artifact") {
       safely(ctx, (store) =>
-        store.append("task_finished", {
+        store.append("tool_checkpoint", {
           toolCallId: event.toolCallId,
-          isError: event.isError,
-          result: resultText(event),
+          toolName: event.toolName,
+          isError: Boolean(event.isError),
+          result: redactCheckpoint(resultText(event, config.maxCheckpointBytes * 2), config.maxCheckpointBytes),
         }),
       );
     }
@@ -300,6 +416,8 @@ export default function leanOmp(pi) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     safely(ctx, (store) => store.append("session_shutdown"));
+    lastTaskHeartbeat.clear();
+    terminalProgress.clear();
     ctx.ui.setStatus("lean-omp", undefined);
   });
 }

@@ -20,7 +20,9 @@ const rawVersion =
   typeof versionOutput === "string"
     ? versionOutput
     : `${versionOutput.stdout || ""} ${versionOutput.stderr || ""}`.trim();
-const compatibility = checkOmpCompatibility(rawVersion);
+const compatibility = checkOmpCompatibility(rawVersion, {
+  allowFutureMajor: process.env.LEAN_OMP_ALLOW_FUTURE_MAJOR === "1",
+});
 const config = loadConfig(process.env);
 
 const report = {

@@ -41,36 +41,26 @@ export function analyzeTaskInput(input, config) {
         `Task ${index + 1} packet is approximately ${packetTokens} tokens; the configured maximum is ${config.maxTaskPacketTokens}.`,
       );
     }
+    const identity = {
+      context: batch ? text(input?.context).trim() : undefined,
+      agent: text(item?.agent) || "task",
+      task: text(item?.task).trim(),
+      outputSchema: item?.outputSchema,
+      schemaMode: item?.schemaMode,
+      isolated: item?.isolated,
+    };
     return {
       index,
       agent: text(item?.agent) || "task",
       name: text(item?.name),
+      hash: digest(identity),
       bodyTokens,
       packetTokens,
     };
   });
 
-  const identity = batch
-    ? {
-        context: text(input?.context).trim(),
-        tasks: tasks.map((item) => ({
-          agent: text(item?.agent) || "task",
-          task: text(item?.task).trim(),
-          outputSchema: item?.outputSchema,
-          schemaMode: item?.schemaMode,
-          isolated: item?.isolated,
-        })),
-      }
-    : {
-        agent: text(input?.agent) || "task",
-        task: text(input?.task).trim(),
-        outputSchema: input?.outputSchema,
-        schemaMode: input?.schemaMode,
-        isolated: input?.isolated,
-      };
-
   return {
-    hash: digest(identity),
+    hash: digest(packets.map((packet) => packet.hash)),
     batch,
     taskCount: tasks.length,
     sharedContextTokens,

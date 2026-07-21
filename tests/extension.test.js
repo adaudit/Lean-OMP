@@ -58,6 +58,16 @@ test("stays inert outside Orca except for the doctor command", () => {
   }
 });
 
+test("fails open without calling any registration API when capabilities are incomplete", () => {
+  let called = false;
+  assert.doesNotThrow(() => leanOmp({
+    on() { called = true; },
+    registerCommand() { called = true; },
+    logger: { warn() {} },
+  }));
+  assert.equal(called, false);
+});
+
 test("registers Orca-scoped enforcement and durable artifacts", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lean-omp-extension-"));
   const saved = {
@@ -98,6 +108,90 @@ test("registers Orca-scoped enforcement and durable artifacts", async () => {
     );
     assert.equal(promptResult.systemPrompt[0], "base");
     assert.match(promptResult.systemPrompt.at(-1), /Lean-OMP orchestration policy/);
+
+    const taskInput = {
+      context: "bounded",
+      tasks: [
+        { agent: "explore", task: "trace one" },
+        { agent: "test-engineer", task: "check two" },
+      ],
+    };
+    await pi.handlers.get("tool_call")(
+      { toolName: "task", toolCallId: "batch-1", input: taskInput },
+      ctx,
+    );
+    await pi.handlers.get("tool_execution_update")(
+      {
+        toolName: "task",
+        toolCallId: "batch-1",
+        partialResult: { details: { progress: [{ index: 0, status: "running", toolCount: 2 }] } },
+      },
+      ctx,
+    );
+    await pi.handlers.get("tool_execution_update")(
+      {
+        toolName: "task",
+        toolCallId: "batch-1",
+        partialResult: { details: { progress: [{ index: 0, status: "running", toolCount: 3 }] } },
+      },
+      ctx,
+    );
+    await pi.handlers.get("tool_execution_update")(
+      {
+        toolName: "task",
+        toolCallId: "async-1",
+        partialResult: {
+          details: {
+            progress: [{ index: 0, status: "completed", toolCount: 4, requests: 2, tokens: 80 }],
+            async: { state: "completed", jobId: "job-1", type: "task" },
+          },
+        },
+      },
+      ctx,
+    );
+    await pi.handlers.get("tool_result")(
+      {
+        toolName: "task",
+        toolCallId: "batch-1",
+        input: taskInput,
+        content: [{ type: "text", text: "batch done" }],
+        details: {
+          results: [
+            { index: 0, agent: "explore", exitCode: 0, output: "one", durationMs: 10, requests: 1, tokens: 20 },
+            { index: 1, agent: "test-engineer", exitCode: 1, output: "", error: "two failed", durationMs: 20, requests: 2, tokens: 30 },
+          ],
+        },
+        isError: false,
+      },
+      ctx,
+    );
+
+    await pi.handlers.get("tool_result")(
+      {
+        toolName: "bash",
+        toolCallId: "bash-1",
+        input: { command: "echo safe" },
+        content: [{ type: "text", text: "token=ghp_abcdefghijklmnopqrstuvwxyz123456 and done" }],
+        isError: false,
+      },
+      ctx,
+    );
+    const checkpoint = fs
+      .readdirSync(root, { recursive: true })
+      .find((entry) => String(entry).endsWith(".jsonl"));
+    assert.ok(checkpoint);
+    const journal = fs.readFileSync(path.join(root, checkpoint), "utf8");
+    assert.match(journal, /tool_checkpoint/);
+    assert.doesNotMatch(journal, /ghp_abcdefghijklmnopqrstuvwxyz123456/);
+    const events = fs
+      .readdirSync(root, { recursive: true })
+      .filter((entry) => String(entry).endsWith(".jsonl"))
+      .flatMap((entry) => fs.readFileSync(path.join(root, entry), "utf8").trim().split("\n").map(JSON.parse));
+    assert.equal(events.filter((event) => event.type === "task_started" && event.toolCallId === "batch-1").length, 2);
+    assert.equal(events.filter((event) => event.type === "task_finished" && event.toolCallId === "batch-1").length, 2);
+    assert.equal(events.find((event) => event.type === "task_finished" && event.childIndex === 1).isError, true);
+    assert.equal(events.filter((event) => event.type === "task_heartbeat" && event.toolCallId === "batch-1" && event.childIndex === 0).length, 1);
+    assert.equal(events.some((event) => event.type === "task_finished" && event.toolCallId === "async-1"), true);
   } finally {
     for (const [name, value] of Object.entries(saved)) {
       const envName = name === "pane" ? "ORCA_PANE_KEY" : name === "root" ? "LEAN_OMP_STATE_ROOT" : name === "max" ? "LEAN_OMP_MAX_TASK_BODY_TOKENS" : "LEAN_OMP_MODE";

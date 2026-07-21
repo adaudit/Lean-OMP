@@ -18,6 +18,23 @@ test("accepts a bounded flat task and gives it a stable identity", () => {
   assert.deepEqual(first.violations, []);
   assert.equal(first.hash, second.hash);
   assert.equal(first.taskCount, 1);
+  assert.equal(first.packets[0].hash, second.packets[0].hash);
+});
+
+test("gives every batch child an independent stable identity", () => {
+  const analysis = analyzeTaskInput(
+    {
+      context: "Only inspect src/auth.",
+      tasks: [
+        { agent: "explore", task: "Trace login." },
+        { agent: "test-engineer", task: "Find missing tests." },
+      ],
+    },
+    config,
+  );
+  assert.notEqual(analysis.packets[0].hash, analysis.packets[1].hash);
+  assert.equal(analysis.packets[0].index, 0);
+  assert.equal(analysis.packets[1].index, 1);
 });
 
 test("blocks oversized shared context and per-agent packets", () => {
