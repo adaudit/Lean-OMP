@@ -1,0 +1,35 @@
+{
+  "name": "@adaudit/lean-omp",
+  "version": "0.1.0",
+  "description": "Update-safe context, delegation, and recovery guardrails for OMP sessions hosted by Orca.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "omp": {
+    "extensions": [
+      "./src/main.js"
+    ]
+  },
+  "files": [
+    "src",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "doctor": "node scripts/doctor.js",
+    "check": "npm run test && npm run doctor"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adaudit/Lean-OMP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adaudit/Lean-OMP/issues"
+  },
+  "homepage": "https://github.com/adaudit/Lean-OMP#readme"
+}
